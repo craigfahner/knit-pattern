@@ -1,7 +1,7 @@
 const rulerSize = 30; // width of the ruler strip on each side, in pixels
 
 let drawWindowWidth = 760;
-let drawWindowHeight = 760;
+let drawWindowHeight = 530; // just below the bottom of the camo generator box
 let margin = 20;
 let pixelWidth = 48; // max 48
 let pixelHeight = 48; // max 48
@@ -23,6 +23,7 @@ let lockableUI = []; // DOM controls that are disabled while locked
 let doneRuns = new Set(); // marked runs, keyed "row:start"
 
 const SESSION_KEY = "knitCamoSession"; // localStorage key for the saved session
+let erasing = false; // true after the saved session is erased, so nothing re-saves it before the reload
 let lastSavedJSON = ""; // last thing written, so unchanged state isn't rewritten
 let resetButton;
 let lockButton;
@@ -51,6 +52,25 @@ let loadPieceButton;
 let exporting = false; // true while the piece image is being rendered (pauses autosave)
 
 let camoButton;
+let prevCamoButton; // step back / forward through camoHistory
+let nextCamoButton;
+let starCamoButton; // stars / unstars the pattern that's showing
+let camoHistory = []; // every generated pattern this session: { w, h, grid, starred } (not saved)
+let camoIndex = -1; // which entry of camoHistory is showing
+let generating = false; // true while generateCamoKnit() runs
+let fillButton; // fills the pattern with the selected colour
+let resetWhiteButton; // restores every whited-out stitch
+let helpButton;
+let helpDialog; // native <dialog> holding the help text
+let camoStatus; // DOM label under "generate camo": "generating...", failure message, or blank
+let lockWarning; // red DOM label shown beside the reset button while locked
+let colourBoxLabels = []; // DOM numbers on top of the colour boxes
+
+// button grid under the pattern editor (sized to the 48x48 maximum)
+const btnTop = margin + 48 * pixelScale + 10; // just below the editor at its largest
+const btnRowH = 24;
+const btnColW = 128; // three columns across the 384px editor
+const btnW = 124;
 
 let mainCanvas; // the piece canvas element (clicks on it mark runs / white out stitches)
 
@@ -95,6 +115,7 @@ function setup() {
 	colourBoxes[1] = new ColourBox("#e3d754", 1, drawWindowWidth - 40, 140);
 	colourBoxes[2] = new ColourBox("#62a839", 2, drawWindowWidth - 70, 170);
 	colourBoxes[3] = new ColourBox("#c99506", 3, drawWindowWidth - 40, 170);
+	createPanelLabels();
 
 	// ---- right column: pattern size ----
 	widthInput = createInput("48", "number");
@@ -170,29 +191,64 @@ function setup() {
 	updateCanvasSize();
 
 	// ---- camo generator box ----
-	camoButton = createButton("generate camo");
+	camoButton = panelButton("generate camo");
 	placeUI(camoButton, colB() - knitSliderW, camoGroupTop + 10);
 	camoButton.mousePressed(camo);
 
-	// ---- bottom rows ----
-	let leftX = colB() - knitSliderW; // left edge of the left control column
-	let rightX = colA() - 140; // left edge of the right control column
+	// history arrows, just right of the camo button
+	let arrowX = colB() - knitSliderW + camoButton.elt.offsetWidth + 4;
+	prevCamoButton = panelButton("\u2190");
+	placeUI(prevCamoButton, arrowX, camoGroupTop + 10);
+	prevCamoButton.mousePressed(() => showCamo(camoIndex - 1));
+	nextCamoButton = panelButton("\u2192");
+	placeUI(nextCamoButton, arrowX + prevCamoButton.elt.offsetWidth + 2, camoGroupTop + 10);
+	nextCamoButton.mousePressed(() => showCamo(camoIndex + 1));
+	starCamoButton = panelButton("\u2606");
+	placeUI(starCamoButton, nextCamoButton.elt.offsetLeft + nextCamoButton.elt.offsetWidth + 2, camoGroupTop + 10);
+	starCamoButton.mousePressed(toggleStar);
+	// the star glyph comes from a fallback font with a taller line box, so pin the arrows and
+	// star to the camo button's height (buttons are border-box, so this is the outer height)
+	let rowH = camoButton.elt.offsetHeight + "px";
+	for (let b of [prevCamoButton, nextCamoButton, starCamoButton]) {
+		b.style("height", rowH);
+		b.style("line-height", "1");
+	}
+	updateHistoryButtons();
+	camoStatus = panelLabel("", colB() - knitSliderW, camoGroupTop + 30,
+		{ valign: "top", align: "left", size: 10 });
 
-	saveButton = createButton("save tile as png");
-	placeUI(saveButton, leftX, 562);
+	// ---- fill: under the zoom hint, left of the shift-click hint ----
+	fillButton = panelButton("fill with selected colour");
+	fillButton.size(130);
+	placeUI(fillButton, colB() - 130, 190);
+	fillButton.mousePressed(fillPattern);
+
+	// ---- button grid under the pattern editor ----
+	saveButton = panelButton("save tile as png");
+	placeBtn(saveButton, 0, 0);
 	saveButton.mousePressed(saveTile);
 
-	saveImageButton = createButton("save piece as png");
-	placeUI(saveImageButton, leftX, 594);
+	saveImageButton = panelButton("save piece as png");
+	placeBtn(saveImageButton, 1, 0);
 	saveImageButton.mousePressed(savePieceImage);
 
-	savePieceButton = createButton("save piece data");
-	placeUI(savePieceButton, rightX, 562);
+	helpButton = panelButton("help");
+	placeBtn(helpButton, 2, 0);
+	helpButton.mousePressed(() => helpDialog.elt.showModal());
+
+	savePieceButton = panelButton("save piece data");
+	placeBtn(savePieceButton, 0, 1);
 	savePieceButton.mousePressed(savePieceFile);
 
-	loadPieceButton = createButton("load piece data");
-	placeUI(loadPieceButton, rightX, 594);
+	loadPieceButton = panelButton("load piece data");
+	placeBtn(loadPieceButton, 1, 1);
 	loadPieceButton.mousePressed(loadPieceFile);
+
+	resetWhiteButton = panelButton("reset white tiles");
+	placeBtn(resetWhiteButton, 2, 1);
+	resetWhiteButton.mousePressed(resetWhiteout);
+
+	createHelpDialog();
 
 	picker = createColorPicker("#000000");
 	picker.position(-100, -100); // off screen
@@ -211,7 +267,8 @@ function setup() {
 
 	createKnitControls();
 
-	windowButton = createButton("close editor window");
+	windowButton = panelButton("close editor window");
+	windowButton.style("font-weight", "bold");
 	windowButton.mousePressed(toggleWindow);
 	placeWindowButton();
 
@@ -219,8 +276,8 @@ function setup() {
 	windowUI = [
 		widthInput, heightInput, scaleInput,
 		pieceWidthInput, pieceHeightInput,
-		camoButton, saveButton, saveImageButton,
-		savePieceButton, loadPieceButton
+		camoButton, prevCamoButton, nextCamoButton, starCamoButton, fillButton, saveButton, saveImageButton,
+		savePieceButton, loadPieceButton, helpButton, resetWhiteButton
 	];
 	for (let cell of knitControls) {
 		if (cell.el) windowUI.push(cell.el); // sliders, checkbox, dropdown
@@ -228,16 +285,22 @@ function setup() {
 	}
 
 	// while locked, only scale, saving and loading stay available
-	const alwaysOn = [scaleInput, saveButton, saveImageButton, savePieceButton, loadPieceButton];
-	lockableUI = windowUI.filter(el => !alwaysOn.includes(el));
+	// (white-out works any time, so "reset white tiles" stays on too)
+	const alwaysOn = [scaleInput, saveButton, saveImageButton, savePieceButton, loadPieceButton,
+		helpButton, resetWhiteButton];
+	// (the history arrows and star aren't in lockableUI: updateHistoryButtons() handles them,
+	// since they also grey out at either end of the history)
+	lockableUI = windowUI.filter(el => !alwaysOn.includes(el) &&
+		el != prevCamoButton && el != nextCamoButton && el != starCamoButton);
 
-	resetButton = createButton("reset tracking");
-	placeUI(resetButton, leftX, 530);
+	// lock and reset share one spot: only one is shown at a time
+	resetButton = panelButton("reset tracking");
+	placeBtn(resetButton, 0, 2);
 	resetButton.mousePressed(resetTracking);
 	resetButton.hide(); // only shown while locked
 
-	lockButton = createButton("lock in pattern");
-	placeUI(lockButton, leftX, 650);
+	lockButton = panelButton("lock in pattern");
+	placeBtn(lockButton, 0, 2);
 	lockButton.mousePressed(() => setLocked(true));
 
 	updateResetButton(); // set the starting visibility of both buttons
@@ -248,8 +311,9 @@ function setup() {
 	applyPanelPos();
 	updateCanvasSize();
 
-	// restore the previous session if there is one; otherwise start with a new pattern
-	if (!loadSession()) camo();
+	// restore the previous session if there is one; otherwise the pattern stays filled
+	// with colour 0 (pixelGrid is filled with currentColour, which starts at 0, above)
+	loadSession();
 
 	// save one last time when the tab or window is closed
 	window.addEventListener("beforeunload", saveSession);
@@ -278,6 +342,112 @@ function placeUI(el, px, py) {
 	el.style("position", "absolute");
 }
 
+// a DOM text label in the editor window (sharper than text() on the density-1 canvas)
+// x is the right edge for align "right" (like textAlign(RIGHT)), else the left edge
+// y is the text baseline, or the top with valign "top"
+function panelLabel(txt, x, y, opts = {}) {
+	let size = opts.size || 12;
+	let el = createDiv(txt);
+	el.parent(panelContent);
+	el.style("position", "absolute");
+	el.style("font", (opts.bold ? "bold " : "") + size + "px sans-serif");
+	el.style("line-height", "1");
+	el.style("white-space", "nowrap");
+	el.style("pointer-events", "none"); // clicks go through to the canvas underneath
+	el.style("user-select", "none");
+	if (opts.colour) el.style("color", opts.colour);
+	let top = opts.valign == "top" ? y : y - round(size * 0.78); // baseline is ~0.78em down
+	el.style("top", top + "px");
+	if (opts.align == "left") el.style("left", x + "px");
+	else el.style("right", (drawWindowWidth - x) + "px");
+	return el;
+}
+
+// the editor window's fixed labels
+function createPanelLabels() {
+	panelLabel("width of pattern", colA(), 30);
+	panelLabel("height of pattern", colA(), 80);
+	panelLabel("width of piece", colB(), 30);
+	panelLabel("height of piece", colB(), 80);
+	panelLabel("pattern scale", colB(), 130);
+	panelLabel("zoom with \u2013 and + keys", colB(), 178, { size: 10 });
+	panelLabel("select colour", colA(), 130);
+	panelLabel("shift-click a colour to edit it", colA(), 208, { size: 10 });
+	panelLabel("CAMO GENERATOR", colA(), camoGroupTop + 12, { valign: "top", bold: true });
+
+	// numbers centred on the colour boxes
+	colourBoxLabels = colourBoxes.map(b => {
+		let el = panelLabel(b.id, b.x, b.y, { valign: "top", align: "left" });
+		el.style("width", colourBoxSize + "px");
+		el.style("line-height", colourBoxSize + "px");
+		el.style("text-align", "center");
+		return el;
+	});
+
+	// on its own line under the button grid, so it doesn't run under the close button
+	lockWarning = panelLabel("warning: resetting will discard stitch tracking!",
+		margin, btnTop + 3 * btnRowH, { valign: "top", align: "left", size: 10, colour: "rgb(180, 0, 0)" });
+	lockWarning.hide();
+}
+
+// a button with small text, used for every button in the editor window
+function panelButton(label) {
+	let b = createButton(label);
+	b.style("font-size", "9px");
+	b.style("padding", "2px 4px");
+	return b;
+}
+
+// place a button in the grid under the pattern editor (col 0-2, row 0-2)
+function placeBtn(el, col, row) {
+	placeUI(el, margin + col * btnColW, btnTop + row * btnRowH);
+	el.size(btnW);
+}
+
+// help text, shown in a native dialog (dimmed background, closes with Escape)
+function createHelpDialog() {
+	helpDialog = createElement("dialog");
+	helpDialog.style("max-width", "520px");
+	helpDialog.style("max-height", "80vh");
+	helpDialog.style("overflow-y", "auto");
+	helpDialog.style("font", "12px sans-serif");
+	helpDialog.style("line-height", "1.4");
+	helpDialog.style("border", "1px solid #000");
+	helpDialog.style("box-shadow", "4px 4px 0 #000");
+	helpDialog.html(`
+		<h3>Knit camo settings</h3>
+		<p><b>colours used:</b> which palette colours the pattern can use (pick at least 2)<br>
+		<b>strict neighbours:</b> on = every stitch needs a same-colour neighbour above, below, left or right; off = a diagonal neighbour also counts<br>
+		<b>diagonal direction:</b> which way shapes lean from row to row<br>
+		<b>max vertical run:</b> most stitches of one colour allowed in a column<br>
+		<b>max gap (hard):</b> every stretch this long in a row must contain every colour (limits float length)<br>
+		<b>ideal gap (soft):</b> the same, but a preference rather than a rule<br>
+		<b>left / up / diagonal weight:</b> how strongly a stitch copies the colour to its left, above or diagonally above; higher = bigger shapes<br>
+		<b>overdue boost:</b> pushes colours that haven't appeared recently (1 = off)<br>
+		<b>lonely boost:</b> helps stitches pair up so none are left on their own<br>
+		<b>repair passes:</b> clean-up rounds that fix any remaining lone stitches<br>
+		<b>attempts:</b> how many patterns to try; the best one is kept<br>
+		<b>time limit:</b> maximum search time in ms; lower = faster but rougher</p>
+		<h3>Designing</h3>
+		<p>Click or drag in the pattern grid to paint with the selected colour. Shift-click a colour to edit it.
+		"fill with selected colour" paints the whole pattern. Zoom the piece with the – and + keys.</p>
+		<h3>The piece</h3>
+		<p>Press Escape to close or open the editor window (or use its &times; box or the "close editor window" button).</p>
+		<p>Close the editor window, then click a run on the piece to mark it as knitted (this locks the pattern).<br>
+		Shift-click or shift-drag on the piece to white out stitches and shape its edges, even while knitting; shift-click again to restore.
+		"reset white tiles" restores every whited-out stitch.</p>
+		<h3>Saving</h3>
+		<p>The state of your session is saved automatically in this browser. You only need to save / load the piece file if you are changing browsers or want a backup. To erase the locally stored data, <a href="#" id="eraseLocalLink">click here</a>.</p>
+	`);
+	helpDialog.elt.querySelector("#eraseLocalLink").addEventListener("click", e => {
+		e.preventDefault(); // don't follow the "#" link
+		eraseLocalData();
+	});
+	let close = createButton("close");
+	close.parent(helpDialog);
+	close.mousePressed(() => helpDialog.elt.close());
+}
+
 // build the floating editor window: title bar, scroll area, canvas
 function createPanel() {
 	panelDiv = createDiv();
@@ -299,6 +469,26 @@ function createPanel() {
 	panelTitle.style("cursor", "move");
 	panelTitle.style("user-select", "none");
 	panelTitle.style("touch-action", "none");
+	panelTitle.style("position", "relative"); // so the close box can sit in its corner
+
+	// close box in the title bar's right corner, inset 2px
+	let closeBox = createDiv("&times;");
+	closeBox.parent(panelTitle);
+	let boxSize = titleH - 4;
+	closeBox.style("position", "absolute");
+	closeBox.style("top", "2px");
+	closeBox.style("right", "2px");
+	closeBox.style("width", boxSize + "px");
+	closeBox.style("height", boxSize + "px");
+	closeBox.style("box-sizing", "border-box");
+	closeBox.style("border", "1px solid #000");
+	closeBox.style("background", "#f0f0f0");
+	closeBox.style("line-height", (boxSize - 2) + "px");
+	closeBox.style("font-size", "11px");
+	closeBox.style("cursor", "pointer");
+	// stop the title bar from starting a drag (its pointer capture would swallow the click)
+	closeBox.elt.addEventListener("pointerdown", e => e.stopPropagation());
+	closeBox.elt.addEventListener("click", toggleWindow);
 
 	panelScroll = createDiv();
 	panelScroll.parent(panelDiv);
@@ -448,22 +638,7 @@ function drawPanel(g) {
 	g.push();
 	g.fill(0);
 	g.noStroke();
-	g.textSize(12);
-	g.textAlign(RIGHT);
-	g.text('width of pattern', colA(), 30);
-	g.text('height of pattern', colA(), 80);
-	g.text('width of piece', colB(), 30);
-	g.text('height of piece', colB(), 80);
-	g.text('pattern scale', colB(), 130);
-	g.push();
-	g.textSize(10);
-	g.text('zoom with – and + keys', colB(), 178);
-	g.pop();
-	g.text('select colour', colA(), 130);
-	g.push();
-	g.textSize(10);
-	g.text('shift-click a colour to edit it', colA(), 208);
-	g.pop();
+	// (labels are DOM elements, made in createPanelLabels(), so they stay sharp)
 	for (let i = 0; i < colourBoxes.length; i++) {
 		colourBoxes[i].display(g);
 	}
@@ -471,16 +646,6 @@ function drawPanel(g) {
 		// grey out the colour boxes
 		g.fill(240, 170);
 		g.rect(drawWindowWidth - 74, 136, 58, 58);
-
-		// warning beside the reset button
-		g.push();
-		g.fill(180, 0, 0);
-		g.textAlign(LEFT, TOP);
-		g.textSize(10);
-		g.textLeading(12);
-		let wx = colB() - knitSliderW + 110;
-		g.text("warning: resetting will discard stitch tracking!", wx, 529, colA() - wx);
-		g.pop();
 		g.fill(0);
 	}
 
@@ -491,15 +656,9 @@ function drawPanel(g) {
 	g.stroke(180);
 	g.strokeWeight(1);
 	g.rect(gx, camoGroupTop, colA() + 10 - gx, camoGroupBottom() - camoGroupTop);
-	g.noStroke();
-	g.fill(0);
-	g.textAlign(RIGHT, TOP);
-	g.textStyle(BOLD);
-	g.text('CAMO GENERATOR', colA(), camoGroupTop + 12);
 	g.pop();
 
 	drawKnitLabels(g);
-	drawKnitHelp(g);
 
 	// pattern editor
 	g.push();
@@ -696,7 +855,7 @@ function placeWindowButton() {
 		// inside the editor window, bottom row
 		windowButton.style("right", "auto");
 		windowButton.style("bottom", "auto");
-		placeUI(windowButton, colA() - 140, 650);
+		placeBtn(windowButton, 1, 2);
 	} else {
 		// floats in the bottom-right corner of the screen
 		windowButton.parent(document.body);
@@ -727,6 +886,7 @@ function setLocked(state) {
 		target.disabled = locked;
 	}
 	updateResetButton();
+	updateHistoryButtons();
 	saveSession();
 }
 
@@ -736,10 +896,14 @@ function updateResetButton() {
 	if (locked) {
 		lockButton.hide();
 		resetButton.show();
+		lockWarning.show();
 	} else {
 		lockButton.show();
 		resetButton.hide();
+		lockWarning.hide();
 	}
+	// fade the colour box numbers along with the boxes' grey overlay
+	for (let el of colourBoxLabels) el.style("opacity", locked ? "0.35" : "1");
 }
 
 function resetTracking() {
@@ -806,8 +970,12 @@ function applyWhiteout(cell) {
 	else if (whiteDrag == "restore" && had) removedStitches.delete(key);
 	else return; // nothing changed
 
-	let row = cell.row;
+	rebuildRowKeepingMarks(cell.row);
+	updateLastKnitRow();
+}
 
+// recompute one row's runs after white-out changes, keeping its knitted marks
+function rebuildRowKeepingMarks(row) {
 	// which stitches in this row were knitted (part of a marked run)?
 	let knitted = new Set();
 	for (let run of pieceRuns[row]) {
@@ -833,8 +1001,23 @@ function applyWhiteout(cell) {
 		}
 		if (allKnitted) doneRuns.add(runKey(row, run.start));
 	}
+}
 
+// "reset white tiles": restore every whited-out stitch (allowed while locked, like white-out)
+function resetWhiteout() {
+	let n = removedStitches.size;
+	if (n == 0) return;
+	let ok = confirm(`Restore ${n} whited-out stitch${n == 1 ? "" : "es"}? Restored stitches count as not knitted.`);
+	if (!ok) return;
+
+	// only rows that had whited-out stitches can change
+	let rows = new Set([...removedStitches].map(k => Number(k.split(":")[0])));
+	removedStitches.clear();
+	for (let row of rows) {
+		if (row < pieceRuns.length) rebuildRowKeepingMarks(row);
+	}
 	updateLastKnitRow();
+	saveSession();
 }
 
 // drop whited-out stitches that fall outside the piece after a size change
@@ -855,6 +1038,12 @@ function setScale(v) {
 }
 
 function keyPressed() {
+	// Escape opens / closes the editor window (but if the help dialog is open, it just closes that)
+	if (key == "Escape") {
+		if (!helpDialog.elt.open) toggleWindow();
+		return;
+	}
+
 	// ignore shortcuts while typing in a text or number field
 	let el = document.activeElement;
 	if (el && el.tagName == "INPUT" && el.type != "range" && el.type != "checkbox") return;
@@ -911,6 +1100,19 @@ function paintAt(px, py) {
 	computeRuns();
 }
 
+// "fill with selected colour": the whole 52x52 grid, so enlarging the pattern later
+// doesn't uncover old cells
+function fillPattern() {
+	if (locked) return;
+	for (let y = 0; y < 52; y++) {
+		for (let x = 0; x < 52; x++) {
+			pixelGrid[y][x] = currentColour;
+		}
+	}
+	imageChanged = true;
+	computeRuns();
+}
+
 class ColourBox {
 	constructor(colour, id, x, y) {
 		this.colour = colour;
@@ -930,11 +1132,7 @@ class ColourBox {
 		}
 		g.fill(this.colour);
 		g.rect(this.x, this.y, colourBoxSize, colourBoxSize);
-		g.textAlign(CENTER, CENTER);
-		g.fill(0);
-		g.noStroke();
-		g.text(this.id, this.x + (colourBoxSize / 2), this.y + (colourBoxSize / 2));
-		g.pop();
+		g.pop(); // (the number on top is a DOM label, see createPanelLabels())
 	}
 }
 
@@ -1079,7 +1277,24 @@ function generateCamoAlternate({
 
 function camo() {
 	if (knitMode == true) {
-		generateCamoKnit(getKnitSettings());
+		setCamoStatus("generating...");
+		generating = true;
+		camoButton.elt.disabled = true; // no double clicks while it runs
+		updateHistoryButtons();
+		// generation blocks the page, so wait for the browser to show "generating..." first
+		// (two frames: the first schedules the paint, the second runs after it)
+		requestAnimationFrame(() => requestAnimationFrame(() => {
+			let ok = generateCamoKnit(getKnitSettings());
+			setCamoStatus(ok ? "" : "failed! try different settings", !ok);
+			if (ok) {
+				// new patterns always go on the end, so nothing earlier is lost
+				camoHistory.push({ w: pixelWidth, h: pixelHeight, grid: pixelGrid.map(r => r.slice()), starred: false });
+				camoIndex = camoHistory.length - 1;
+			}
+			generating = false;
+			camoButton.elt.disabled = locked;
+			updateHistoryButtons();
+		}));
 		return;
 	}
 	let rand = Math.floor(random(2));
@@ -1088,6 +1303,54 @@ function camo() {
 	} else {
 		generateCamoAlternate();
 	}
+}
+
+// show entry i of camoHistory, including the pattern size it was made at
+function showCamo(i) {
+	if (locked || generating || i < 0 || i >= camoHistory.length) return;
+	camoIndex = i;
+	let entry = camoHistory[i];
+	for (let y = 0; y < 52; y++) {
+		for (let x = 0; x < 52; x++) pixelGrid[y][x] = entry.grid[y][x];
+	}
+	pixelWidth = entry.w;
+	pixelHeight = entry.h;
+	widthInput.value(pixelWidth);
+	heightInput.value(pixelHeight);
+	setCamoStatus("");
+	imageChanged = true;
+	computeRuns();
+	updateHistoryButtons();
+}
+
+// star or unstar the pattern that's showing
+function toggleStar() {
+	let entry = camoHistory[camoIndex];
+	if (!entry || generating) return;
+	entry.starred = !entry.starred;
+	updateHistoryButtons();
+}
+
+// grey out an arrow at the oldest / newest pattern, while locked, or while generating;
+// show the star filled or empty for the pattern that's showing
+function updateHistoryButtons() {
+	if (!prevCamoButton) return; // not created yet
+	let off = locked || generating;
+	prevCamoButton.elt.disabled = off || camoIndex <= 0;
+	nextCamoButton.elt.disabled = off || camoIndex >= camoHistory.length - 1;
+
+	// starring doesn't change the pattern, so it stays available while locked
+	let entry = camoHistory[camoIndex];
+	starCamoButton.elt.disabled = generating || !entry;
+	let starred = entry && entry.starred;
+	starCamoButton.html(starred ? "\u2605" : "\u2606");
+	starCamoButton.style("color", starred ? "#c99506" : "");
+}
+
+// status text under the "generate camo" button (red for errors)
+function setCamoStatus(msg, isError = false) {
+	camoStatus.html(msg);
+	camoStatus.style("color", isError ? "rgb(180, 0, 0)" : "#000");
 }
 
 // function generateCamoKnit({
@@ -1261,7 +1524,7 @@ function generateCamoKnit({
 
 	if (w < n) {
 		console.warn("pattern is too narrow to fit every colour in each row");
-		return;
+		return false;
 	}
 
 	const ORTH = [
@@ -1509,7 +1772,7 @@ function generateCamoKnit({
 
 	if (!best) {
 		console.warn("couldn't satisfy all hard rules; try a longer timeLimit, a bigger pattern or looser settings");
-		return;
+		return false;
 	}
 
 	for (let y = 0; y < h; y++) {
@@ -1520,6 +1783,7 @@ function generateCamoKnit({
 	imageChanged = true;
 	computeRuns();
 	console.log(`knit camo: soft score ${bestScore} (0 = every soft goal met)`);
+	return true;
 }
 
 // ---------- knit camo controls ----------
@@ -1651,6 +1915,7 @@ function createKnitControls() {
 		let top = knitCellTop(i);
 		let sx = right - knitSliderW; // panel coordinates
 		let sy = top + 16;
+		cell.labelEl = panelLabel(cell.label, right, top + 12);
 
 		if (cell.type == "slider") {
 			cell.el = createSlider(cell.min, cell.max, cell.value, cell.step);
@@ -1679,25 +1944,23 @@ function createKnitControls() {
 	knitControls = cells;
 }
 
-// labels (with current slider values) and palette swatches, drawn onto the panel canvas g
+// palette swatches drawn onto the panel canvas g, and slider values kept up to date
+// in the DOM labels (checked every frame, so loaded sessions update too)
 function drawKnitLabels(g) {
 	g.push();
-	g.fill(0);
 	g.noStroke();
-	g.textAlign(RIGHT);
 	knitControls.forEach((cell, i) => {
 		let right = knitCellRight(i);
 		let top = knitCellTop(i);
 		let label = cell.label;
 		if (cell.type == "slider") label += ": " + cell.el.value();
-		g.text(label, right, top + 12);
+		if (cell.labelEl.elt.textContent != label) cell.labelEl.html(label);
 
 		if (cell.type == "palette") {
 			for (let c = 0; c < cell.els.length; c++) {
 				g.fill(colourBoxes[c].colour);
 				g.rect(right - knitSliderW + c * 35 + 20, top + 18, 12, 12);
 			}
-			g.fill(0);
 		}
 	});
 	g.pop();
@@ -1728,44 +1991,6 @@ function getKnitSettings() {
 		s.palette = [0, 1, 2];
 	}
 	return s;
-}
-
-function drawKnitHelp(g) {
-	let x = margin;
-	let y = margin + pixelHeight * pixelScale + 12; // just below the editor
-	let w = drawWindowWidth - 20 - knitColGap - knitSliderW - 10 - x; // stops before the slider columns
-
-	const help = [
-		"KNIT CAMO SETTINGS",
-		"colours used: which palette colours the pattern can use (pick at least 2)",
-		"strict neighbours: on = every stitch needs a same-colour neighbour above, below, left or right; off = a diagonal neighbour also counts",
-		"diagonal direction: which way shapes lean from row to row",
-		"max vertical run: most stitches of one colour allowed in a column",
-		"max gap (hard): every stretch this long in a row must contain every colour (limits float length)",
-		"ideal gap (soft): the same, but a preference rather than a rule",
-		"left / up / diagonal weight: how strongly a stitch copies the colour to its left, above or diagonally above; higher = bigger shapes",
-		"overdue boost: pushes colours that haven't appeared recently (1 = off)",
-		"lonely boost: helps stitches pair up so none are left on their own",
-		"repair passes: clean-up rounds that fix any remaining lone stitches",
-		"attempts: how many patterns to try; the best one is kept",
-		"time limit: maximum search time in ms; lower = faster but rougher",
-		"",
-		"THE PIECE",
-		"close the editor window, then click a run on the piece to mark it as knitted (this locks the pattern)",
-		"shift-click or shift-drag on the piece to white out stitches and shape its edges, even while knitting; shift-click again to restore",
-		"",
-		"SAVING",
-		"The state of your session is saved automatically in this browser. You only need to save / load the piece file if you are changing browsers or want a backup."
-	];
-
-	g.push();
-	g.fill(0);
-	g.noStroke();
-	g.textAlign(LEFT, TOP);
-	g.textSize(10);
-	g.textLeading(12);
-	g.text(help.join("\n"), x, y, w);
-	g.pop();
 }
 
 function pieceCode(col, row) {
@@ -1888,6 +2113,7 @@ function getSessionState() {
 
 function saveSession() {
 	if (exporting) return; // the export temporarily changes the scale; don't save that
+	if (erasing) return; // the saved session was just erased; the page is reloading
 	let json = JSON.stringify(getSessionState());
 	if (json === lastSavedJSON) return; // nothing changed
 	try {
@@ -1896,6 +2122,16 @@ function saveSession() {
 	} catch (e) {
 		console.warn("couldn't save the session to localStorage", e);
 	}
+}
+
+// erase the session saved in this browser (after a warning), then reload with a blank pattern
+function eraseLocalData() {
+	let ok = confirm("Erase the data saved in this browser? Your pattern, colours, stitch tracking and " +
+		"white-out will be lost unless you have saved a piece file. The page will reload with a blank pattern.");
+	if (!ok) return;
+	erasing = true; // stop the autosave and the save-on-close from writing it straight back
+	localStorage.removeItem(SESSION_KEY); // only this tool's key, not other sites' data on the same address
+	location.reload();
 }
 
 // restore the session saved in this browser; returns true if one was loaded

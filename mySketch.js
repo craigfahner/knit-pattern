@@ -781,12 +781,36 @@ function runAt(px, py) {
 }
 
 // mark or unmark a run; marking locks the pattern
+// marking a run in a row that already has marks also marks every run between it and the
+// nearest marked run, since the knitter may have done several runs before clicking
 function toggleRun(row, run) {
 	let key = runKey(row, run.start);
+	let added = 0; // runs newly marked by this click
 	if (doneRuns.has(key)) {
 		doneRuns.delete(key);
 	} else {
-		doneRuns.add(key);
+		let runs = pieceRuns[row];
+		let i = runs.indexOf(run);
+
+		// nearest marked run in this row (a tie goes to the one on the right, knitted first)
+		let nearest = -1;
+		for (let j = 0; j < runs.length; j++) {
+			if (j == i || !doneRuns.has(runKey(row, runs[j].start))) continue;
+			if (nearest < 0 || abs(j - i) < abs(nearest - i) ||
+				(abs(j - i) == abs(nearest - i) && j > nearest)) nearest = j;
+		}
+
+		// mark the clicked run, plus everything between it and the nearest marked run
+		// (whited-out stitches aren't runs, so gaps of white are simply skipped)
+		let from = nearest < 0 ? i : min(i, nearest);
+		let to = nearest < 0 ? i : max(i, nearest);
+		for (let k = from; k <= to; k++) {
+			let kKey = runKey(row, runs[k].start);
+			if (!doneRuns.has(kKey)) {
+				doneRuns.add(kKey);
+				added++;
+			}
+		}
 		if (!locked) setLocked(true);
 	}
 
@@ -794,7 +818,8 @@ function toggleRun(row, run) {
 	let first = pieceWidth - run.start - run.len + 1;
 	let last = pieceWidth - run.start;
 	console.log(`row ${lastKnitRow - row + 1}, stitches ${first}–${last} (${run.len}): ` +
-		`${doneRuns.has(key) ? "marked" : "unmarked"} · ${doneRuns.size} runs marked`);
+		`${doneRuns.has(key) ? "marked" + (added > 1 ? ` (+${added - 1} between)` : "") : "unmarked"}` +
+		` · ${doneRuns.size} runs marked`);
 
 	saveSession(); // save marks immediately, don't wait for the autosave
 }

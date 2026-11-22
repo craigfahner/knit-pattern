@@ -1541,7 +1541,9 @@ function generateCamoKnit({
 	lonelyBoost = 20, // strongly favour pairing up with an isolated neighbour
 	repairPasses = 12,
 	attempts = 60,
-	timeLimit = 3000 // ms; keeps the best result found in this time
+	timeLimit = 3000, // ms; keeps the best result found in this time
+	seamBand = 6, // seam blending: stitches on each side of the tile edges that get re-picked
+	seamPasses = 10 // seam blending: rounds of re-picking (0 = off)
 } = {}) {
 	const w = pixelWidth;
 	const h = pixelHeight;
@@ -1758,6 +1760,54 @@ function generateCamoKnit({
 		return true;
 	}
 
+	// ---------- stage 3: blend the tile edges ----------
+
+	// rows and columns are filled top to bottom, left to right, so the first row and column
+	// never see what ends up beside them across the wrap; shapes rarely join there and the
+	// tile shows as a square. Re-pick stitches near the edges, weighing neighbours on both
+	// sides. Only changes that keep every hard rule are accepted, so the grid stays valid.
+	function blendSeams(g) {
+		let cells = [];
+		for (let y = 0; y < h; y++) {
+			for (let x = 0; x < w; x++) {
+				if (min(x, w - 1 - x) < seamBand || min(y, h - 1 - y) < seamBand) cells.push([x, y]);
+			}
+		}
+		for (let pass = 0; pass < seamPasses; pass++) {
+			for (let [x, y] of shuffle(cells)) {
+				let old = g[y][x];
+				let before = isoAround(g, x, y);
+				let weights = [];
+				for (let c = 0; c < n; c++) {
+					g[y][x] = c;
+					// keeping the current colour is always allowed; a new one must keep the rules
+					// and leave this stitch with a same-coloured neighbour
+					let ok = c === old || (changeIsValid(g, x, y, before) && hasLike(g, x, y, hardDirs));
+					if (!ok) {
+						weights.push(0);
+						continue;
+					}
+					let wt = 1;
+					if (at(g, x - 1, y) === c) wt += leftWeight;
+					if (at(g, x + 1, y) === c) wt += leftWeight;
+					if (at(g, x, y - 1) === c) wt += upWeight;
+					if (at(g, x, y + 1) === c) wt += upWeight;
+					if (at(g, x - diagDir, y - 1) === c) wt += diagWeight;
+					if (at(g, x + diagDir, y + 1) === c) wt += diagWeight;
+					weights.push(wt);
+				}
+				let total = weights.reduce((a, b) => a + b, 0);
+				let r = random(total);
+				let pick = 0;
+				while (pick < n - 1 && r >= weights[pick]) {
+					r -= weights[pick];
+					pick++;
+				}
+				g[y][x] = pick;
+			}
+		}
+	}
+
 	// ---------- scoring (soft goals) ----------
 
 	function softScore(g) {
@@ -1785,6 +1835,7 @@ function generateCamoKnit({
 	for (let a = 0; a < attempts; a++) {
 		let g = buildAttempt();
 		if (g && repair(g)) {
+			blendSeams(g);
 			let score = softScore(g);
 			if (score < bestScore) {
 				best = g;

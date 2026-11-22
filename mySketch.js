@@ -1766,6 +1766,22 @@ function generateCamoKnit({
 	// never see what ends up beside them across the wrap; shapes rarely join there and the
 	// tile shows as a square. Re-pick stitches near the edges, weighing neighbours on both
 	// sides. Only changes that keep every hard rule are accepted, so the grid stays valid.
+	// Changes that leave more stitches without an orthogonal same-colour neighbour are refused
+	// (the hard rule alone allows diagonal-only touching, which looked like scattered singles),
+	// and the last few passes pick the best-fitting colour outright so stitches settle into blobs.
+	const seamGreedyPasses = 3;
+
+	// how many of (x, y) and its 4 orthogonal neighbours have no orthogonal same-colour neighbour
+	function lonelyAround(g, x, y) {
+		let count = hasLike(g, x, y, ORTH) ? 0 : 1;
+		for (let d of ORTH) {
+			let nx = (x + d[0] + w) % w;
+			let ny = (y + d[1] + h) % h;
+			if (!hasLike(g, nx, ny, ORTH)) count++;
+		}
+		return count;
+	}
+
 	function blendSeams(g) {
 		let cells = [];
 		for (let y = 0; y < h; y++) {
@@ -1774,15 +1790,18 @@ function generateCamoKnit({
 			}
 		}
 		for (let pass = 0; pass < seamPasses; pass++) {
+			let greedy = pass >= seamPasses - seamGreedyPasses;
 			for (let [x, y] of shuffle(cells)) {
 				let old = g[y][x];
 				let before = isoAround(g, x, y);
+				let lonelyBefore = lonelyAround(g, x, y);
 				let weights = [];
 				for (let c = 0; c < n; c++) {
 					g[y][x] = c;
 					// keeping the current colour is always allowed; a new one must keep the rules
 					// and leave this stitch with a same-coloured neighbour
-					let ok = c === old || (changeIsValid(g, x, y, before) && hasLike(g, x, y, hardDirs));
+					let ok = c === old || (changeIsValid(g, x, y, before) && hasLike(g, x, y, hardDirs) &&
+						lonelyAround(g, x, y) <= lonelyBefore);
 					if (!ok) {
 						weights.push(0);
 						continue;
@@ -1796,12 +1815,20 @@ function generateCamoKnit({
 					if (at(g, x + diagDir, y + 1) === c) wt += diagWeight;
 					weights.push(wt);
 				}
-				let total = weights.reduce((a, b) => a + b, 0);
-				let r = random(total);
 				let pick = 0;
-				while (pick < n - 1 && r >= weights[pick]) {
-					r -= weights[pick];
-					pick++;
+				if (greedy) {
+					// best-fitting colour; ties keep the current one, so no colour is favoured
+					pick = old;
+					for (let c = 0; c < n; c++) {
+						if (weights[c] > weights[pick]) pick = c;
+					}
+				} else {
+					let total = weights.reduce((a, b) => a + b, 0);
+					let r = random(total);
+					while (pick < n - 1 && r >= weights[pick]) {
+						r -= weights[pick];
+						pick++;
+					}
 				}
 				g[y][x] = pick;
 			}

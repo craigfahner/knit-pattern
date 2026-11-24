@@ -32,6 +32,10 @@ let pieceWidth = 100; // whole number, set by the "width of piece" field
 let pieceHeight = 100; // whole number, set by the "height of piece" field
 let pieceWidthInput;
 let pieceHeightInput;
+// rows added to (or removed from) the top of the piece since it was laid out. The pattern is
+// read with this offset, so existing rows keep their colours when the height changes, and new
+// rows at the top carry the repeat on upward.
+let pieceRowShift = 0;
 let pieceRuns = []; // pieceRuns[row] = [{ start, len, code }, ...] - tracks runs of like colours in rows
 let textColourCache = {}; // stitch colour -> black or white text
 
@@ -170,11 +174,8 @@ function setup() {
 	pieceHeightInput.size(52);
 	pieceHeightInput.changed(() => {
 		let v = int(pieceHeightInput.value());
-		if (!isNaN(v)) pieceHeight = constrain(v, 1, 999);
+		if (!isNaN(v)) setPieceHeight(constrain(v, 1, 999));
 		pieceHeightInput.value(pieceHeight);
-		pruneRemoved();
-		computeRuns();
-		updateCanvasSize();
 	});
 
 	scaleInput = createInput(str(bgScale), "number");
@@ -286,8 +287,9 @@ function setup() {
 
 	// while locked, only scale, saving and loading stay available
 	// (white-out works any time, so "reset white tiles" stays on too)
+	// (piece height stays on too, but can only grow while locked: see updateHeightMin())
 	const alwaysOn = [scaleInput, saveButton, saveImageButton, savePieceButton, loadPieceButton,
-		helpButton, resetWhiteButton];
+		helpButton, resetWhiteButton, pieceHeightInput];
 	// (the history arrows and star aren't in lockableUI: updateHistoryButtons() handles them,
 	// since they also grey out at either end of the history)
 	lockableUI = windowUI.filter(el => !alwaysOn.includes(el) &&
@@ -435,7 +437,8 @@ function createHelpDialog() {
 		<p>Press Escape to close or open the editor window (or use its &times; box or the "close editor window" button).</p>
 		<p>Close the editor window, then click a run on the piece to mark it as knitted (this locks the pattern).<br>
 		Shift-click or shift-drag on the piece to white out stitches and shape its edges, even while knitting; shift-click again to restore.
-		"reset white tiles" restores every whited-out stitch.</p>
+		"reset white tiles" restores every whited-out stitch.<br>
+		To make the piece longer while knitting, raise "height of piece": new rows are added at the top and carry the pattern on. While knitting, the height can only be increased.</p>
 		<h3>Saving</h3>
 		<p>The state of your session is saved automatically in this browser. You only need to save / load the piece file if you are changing browsers or want a backup. To erase the locally stored data, <a href="#" id="eraseLocalLink">click here</a>.</p>
 	`);
@@ -912,6 +915,7 @@ function setLocked(state) {
 	}
 	updateResetButton();
 	updateHistoryButtons();
+	updateHeightMin();
 	saveSession();
 }
 
@@ -1043,6 +1047,43 @@ function resetWhiteout() {
 	}
 	updateLastKnitRow();
 	saveSession();
+}
+
+// change the piece height by adding or removing rows at the TOP, since knitting starts at the
+// bottom. Existing rows keep their pattern, marks and white-out; while locked it can only grow.
+function setPieceHeight(newH) {
+	let added = newH - pieceHeight;
+	if (added == 0) return;
+	if (locked && added < 0) return; // mid-knit: never take rows away
+
+	// every existing row moves down by `added` (row 0 is the top)
+	pieceRowShift += added;
+	removedStitches = shiftRowKeys(removedStitches, added);
+	doneRuns = shiftRowKeys(doneRuns, added);
+	pieceHeight = newH;
+
+	computeRuns();
+	updateCanvasSize();
+	updateHeightMin();
+	// keep the rows that were on screen in view (they've moved down by the added rows)
+	window.scrollBy(0, added * bgScale);
+	saveSession();
+}
+
+// move "row:..." keys (whited-out stitches, marked runs) by dy rows, dropping any above the top
+function shiftRowKeys(keys, dy) {
+	let out = new Set();
+	for (let k of keys) {
+		let i = k.indexOf(":");
+		let row = Number(k.slice(0, i)) + dy;
+		if (row >= 0) out.add(row + k.slice(i));
+	}
+	return out;
+}
+
+// while locked, the piece height field won't go below the current height
+function updateHeightMin() {
+	pieceHeightInput.attribute("min", locked ? str(pieceHeight) : "1");
 }
 
 // drop whited-out stitches that fall outside the piece after a size change
@@ -2097,7 +2138,8 @@ function getKnitSettings() {
 }
 
 function pieceCode(col, row) {
-	return pixelGrid[row % pixelHeight][col % pixelWidth];
+	let r = ((row - pieceRowShift) % pixelHeight + pixelHeight) % pixelHeight; // positive modulo
+	return pixelGrid[r][col % pixelWidth];
 }
 
 // split every row of the piece into runs of the same colour
@@ -2200,7 +2242,8 @@ function getSessionState() {
 		},
 		piece: {
 			width: pieceWidth,
-			height: pieceHeight
+			height: pieceHeight,
+			rowShift: pieceRowShift // rows added at the top since the pattern was laid out
 		},
 		scale: bgScale,
 		knitControls: getKnitControlState(),
@@ -2286,6 +2329,7 @@ function applySession(s) {
 		// piece and scale
 		pieceWidth = constrain(int(s.piece.width), 1, 999);
 		pieceHeight = constrain(int(s.piece.height), 1, 999);
+		pieceRowShift = int(s.piece.rowShift) || 0; // older saves don't have it
 		bgScale = constrain(int(s.scale), 1, 30);
 
 		// show the restored values in the input fields
